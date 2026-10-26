@@ -1,0 +1,14 @@
+# Maven 빌드 산출물
+target/
+
+# 수신기 실행 결과 (디렉터리는 .gitkeep으로 유지)
+data/*
+!data/.gitkeep
+
+# 로컬 환경 변수
+.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
