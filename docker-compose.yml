@@ -1,0 +1,85 @@
+# 구성: ZooKeeper + Kafka 0.9.0.0 + 연속 Producer + 배치 수신기(KafkaBatchReceiver) + Kafdrop 웹 UI
+#   docker compose up -d --build           # zookeeper, kafka, 토픽 생성, producer, kafdrop 기동
+#   docker compose run --rm receiver       # 배치 수신기 1회 실행 (결과: ./data)
+#   http://localhost:9090                  # Kafdrop 웹 UI (KAFDROP_PORT로 변경 가능)
+services:
+  zookeeper:
+    build: ./kafka
+    image: local/kafka:0.9.0.0
+    command: ["zookeeper-server-start.sh", "config/zookeeper.properties"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/2181'"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: local/kafka:0.9.0.0
+    command: ["kafka-server-start.sh", "config/server.properties"]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # 파티션 3개짜리 토픽을 명시적으로 생성
+  kafka-init:
+    image: local/kafka:0.9.0.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-my-topic}
+    # Kafka 0.9의 kafka-topics.sh에는 --if-not-exists 옵션이 없어 목록 확인 후 생성
+    command:
+      - bash
+      - -c
+      - |
+        if kafka-topics.sh --zookeeper zookeeper:2181 --list | grep -qx "$$KAFKA_TOPIC"; then
+          echo "topic $$KAFKA_TOPIC already exists"
+        else
+          kafka-topics.sh --zookeeper zookeeper:2181 --create --topic "$$KAFKA_TOPIC" --partitions 3 --replication-factor 1
+        fi
+        kafka-topics.sh --zookeeper zookeeper:2181 --describe --topic "$$KAFKA_TOPIC"
+    restart: "no"
+
+  producer:
+    build: ./producer
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-my-topic}
+      PRODUCE_INTERVAL_MS: ${PRODUCE_INTERVAL_MS:-200}
+      TZ: ${TZ:-Asia/Seoul}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # 웹 UI. kafbat UI는 ApiVersions 요청(0.10+) 때문에 0.9에 연결되지 않아 Kafdrop 2.x를 사용
+  kafdrop:
+    build: ./kafdrop
+    ports:
+      - "${KAFDROP_PORT:-9090}:9000"
+    command: ["--zookeeper.connect=zookeeper:2181"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 배치 작업이므로 `up`으로는 기동하지 않음 → `docker compose run --rm receiver`
+  receiver:
+    build: ./kafka-batch
+    profiles: ["batch"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-my-topic}
+      TZ: ${TZ:-Asia/Seoul}   # 결과 파일명 타임스탬프 기준
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
